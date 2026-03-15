@@ -4,10 +4,10 @@ import com.google.gson.annotations.SerializedName
 
 data class VerifyResponse(
     @SerializedName("status")
-    val status: String,
+    val status: String? = null,
 
     @SerializedName("message")
-    val message: String,
+    val message: String? = null,
 
     @SerializedName("register_number")
     val registerNumber: String? = null,
@@ -24,4 +24,3 @@ data class VerifyResponse(
     @SerializedName("college")
     val college: String? = null
 )
-

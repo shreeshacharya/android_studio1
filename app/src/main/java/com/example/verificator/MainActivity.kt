@@ -1,38 +1,53 @@
 package com.example.verificator
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
+import okhttp3.OkHttpClient
 import okhttp3.RequestBody.Companion.asRequestBody
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.TimeUnit
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { VerificatorApp() }
+        setContent {
+            Surface(color = MaterialTheme.colorScheme.background) {
+                VerificatorApp()
+            }
+        }
     }
 }
 
@@ -44,149 +59,160 @@ fun VerificatorApp() {
     var bitmap by remember { mutableStateOf<Bitmap?>(null) }
     var imageUri by remember { mutableStateOf<Uri?>(null) }
     var isLoading by remember { mutableStateOf(false) }
-    var resultText by remember { mutableStateOf("Upload or scan a certificate to verify") }
+    var resultText by remember { mutableStateOf("Ready") }
+    var registerNumber by remember { mutableStateOf("") }
+    var serverUrl by remember { mutableStateOf("http://127.0.0.1:3000") }
 
-    // Create Retrofit instance
-    val retrofit = remember {
-        Retrofit.Builder()
-            .baseUrl("http://10.0.2.2:3000/")
-            .addConverterFactory(GsonConverterFactory.create())
-            .build()
+    val apiService = remember(serverUrl) {
+        try {
+            val client = OkHttpClient.Builder()
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(15, TimeUnit.SECONDS)
+                .build()
+
+            Retrofit.Builder()
+                .baseUrl(if (serverUrl.endsWith("/")) serverUrl else "$serverUrl/")
+                .client(client)
+                .addConverterFactory(GsonConverterFactory.create())
+                .build()
+                .create(ApiService::class.java)
+        } catch (e: Exception) { null }
     }
 
-    val apiService = remember { retrofit.create(ApiService::class.java) }
-
-    fun verifyCertificate(imageFile: File) {
+    fun fetchRecord(regNo: String) {
         isLoading = true
-        resultText = "Verifying certificate..."
-
+        resultText = "Fetching..."
         scope.launch {
             try {
-                val requestBody = imageFile.asRequestBody("image/*".toMediaType())
-                val multipartBody = MultipartBody.Part.createFormData("image", imageFile.name, requestBody)
-
-                val response = withContext(Dispatchers.IO) {
-                    apiService.verifyCertificate(multipartBody)
+                val response = withContext(Dispatchers.IO) { apiService?.getRecord(regNo) }
+                if (response?.isSuccessful == true) {
+                    val r = response.body()
+                    resultText = "✅ DATA RECEIVED:\nName: ${r?.name}\nCollege: ${r?.college}\nResult: ${r?.result}"
+                } else if (response?.code() == 404) {
+                    resultText = "❌ No record found!\nThis certificate is not legit."
+                } else {
+                    resultText = "❌ Error: ${response?.code()}\nCould not verify record."
                 }
+            } catch (e: Exception) {
+                resultText = "⚠️ Connection Failed: ${e.localizedMessage}"
+            } finally { isLoading = false }
+        }
+    }
 
-                if (response.isSuccessful) {
-                    val result = response.body()
-                    if (result != null) {
-                        resultText = when (result.status) {
-                            "genuine" -> "Genuine: ${result.message}\nRegister: ${result.registerNumber}\nName: ${result.name}\nSemester: ${result.semester}\nResult: ${result.result}\nCollege: ${result.college}"
-                            "alert" -> "Alert: ${result.message}"
-                            else -> "Error: ${result.message}"
-                        }
+    fun verifyImage(file: File) {
+        isLoading = true
+        resultText = "Verifying..."
+        scope.launch {
+            try {
+                val part = MultipartBody.Part.createFormData("image", file.name, file.asRequestBody("image/jpeg".toMediaType()))
+                val response = withContext(Dispatchers.IO) { apiService?.verifyCertificate(part) }
+                if (response?.isSuccessful == true) {
+                    val res = response.body()
+                    if (res?.status == "genuine") {
+                        resultText = "✅ Genuine Certificate!\nMessage: ${res.message}"
                     } else {
-                        resultText = "Error: Empty response body"
+                        resultText = "❌ Alert: ${res?.message ?: "Certificate not legit"}"
                     }
                 } else {
-                    resultText = "Error: ${response.code()} ${response.message()}"
+                    resultText = "❌ No record found!\nThis certificate is not legit."
                 }
             } catch (e: Exception) {
                 resultText = "Error: ${e.message}"
-            } finally {
-                isLoading = false
-            }
+            } finally { isLoading = false }
         }
     }
 
-    fun verifyBitmap(bmp: Bitmap) {
-        val file = File(context.cacheDir, "certificate_${System.currentTimeMillis()}.jpg")
-        FileOutputStream(file).use { out -> bmp.compress(Bitmap.CompressFormat.JPEG, 90, out) }
-        verifyCertificate(file)
-    }
-
-    fun verifyUri(uri: Uri) {
-        try {
-            val inputStream = context.contentResolver.openInputStream(uri)
-            val file = File(context.cacheDir, "certificate_${System.currentTimeMillis()}.jpg")
-            inputStream?.use { input -> FileOutputStream(file).use { output -> input.copyTo(output) } }
-            verifyCertificate(file)
-        } catch (e: Exception) {
-            resultText = "Error loading image: ${e.message}"
-        }
-    }
-
-    val cameraLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.TakePicturePreview()
-    ) { image ->
-        if (image != null) {
-            bitmap = image
+    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { 
+        if (it != null) {
+            bitmap = it
             imageUri = null
-            resultText = "Certificate scanned"
-            verifyBitmap(image)
+            resultText = "Captured. Ready to verify."
         }
     }
 
-    val galleryLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri ->
-        if (uri != null) {
-            imageUri = uri
+    val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { 
+        if (it != null) {
+            imageUri = it
             bitmap = null
-            resultText = "Certificate uploaded"
-            verifyUri(uri)
+            resultText = "Selected. Ready to verify."
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize().padding(20.dp)) {
-        Spacer(modifier = Modifier.height(30.dp))
-        Text(text = "Verificator", fontSize = 32.sp)
-        Spacer(modifier = Modifier.height(5.dp))
-        Text(text = "AI Certificate Verification", fontSize = 16.sp)
-        Spacer(modifier = Modifier.height(20.dp))
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { if (it) cameraLauncher.launch(null) }
 
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
+        Text("Verificator AI", fontSize = 28.sp, fontWeight = FontWeight.Bold)
+        
+        Spacer(modifier = Modifier.height(10.dp))
+        
+        // Header image
         Image(
             painter = painterResource(id = R.drawable.security_scan),
-            contentDescription = "Security Scan",
-            modifier = Modifier.fillMaxWidth().height(180.dp)
+            contentDescription = "Security Scan Header",
+            modifier = Modifier.fillMaxWidth().height(150.dp)
         )
-
-        Spacer(modifier = Modifier.height(30.dp))
-
-        Card(modifier = Modifier.fillMaxWidth(), elevation = CardDefaults.cardElevation(6.dp)) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Button(
-                    onClick = { cameraLauncher.launch(null) },
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = !isLoading
-                ) { Text("Scan Certificate") }
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                Button(
-                    onClick = { galleryLauncher.launch("image/*") },
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = !isLoading
-                ) { Text("Upload Certificate") }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(30.dp))
-
-        bitmap?.let {
-            Image(bitmap = it.asImageBitmap(), contentDescription = "Captured Image",
-                modifier = Modifier.fillMaxWidth().height(250.dp))
-        }
-
-        imageUri?.let {
-            AsyncImage(model = it, contentDescription = "Uploaded Image",
-                modifier = Modifier.fillMaxWidth().height(250.dp))
+        
+        Spacer(modifier = Modifier.height(10.dp))
+        
+        OutlinedTextField(value = serverUrl, onValueChange = { serverUrl = it }, label = { Text("Server URL") }, modifier = Modifier.fillMaxWidth())
+        
+        Spacer(modifier = Modifier.height(10.dp))
+        Row {
+            OutlinedTextField(value = registerNumber, onValueChange = { registerNumber = it }, label = { Text("Reg No") }, modifier = Modifier.weight(1f))
+            Button(onClick = { fetchRecord(registerNumber) }, modifier = Modifier.padding(top = 8.dp, start = 8.dp), enabled = !isLoading) { Text("Fetch") }
         }
 
         Spacer(modifier = Modifier.height(20.dp))
+        Row(modifier = Modifier.fillMaxWidth()) {
+            Button(onClick = { 
+                if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) cameraLauncher.launch(null)
+                else permissionLauncher.launch(Manifest.permission.CAMERA)
+            }, modifier = Modifier.weight(1f)) { Text("Scan") }
+            Spacer(modifier = Modifier.width(8.dp))
+            Button(onClick = { galleryLauncher.launch("image/*") }, modifier = Modifier.weight(1f)) { Text("Upload") }
+        }
 
-        Card(modifier = Modifier.fillMaxWidth(), elevation = CardDefaults.cardElevation(4.dp)) {
-            if (isLoading) {
-                Row(modifier = Modifier.padding(16.dp).fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center) {
-                    CircularProgressIndicator(modifier = Modifier.size(24.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(text = "Verifying...", fontSize = 18.sp)
+        Spacer(modifier = Modifier.height(10.dp))
+        
+        // --- IMAGE PREVIEW SECTION ---
+        if (bitmap != null || imageUri != null) {
+            Card(modifier = Modifier.fillMaxWidth().height(250.dp).padding(vertical = 8.dp)) {
+                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                    bitmap?.let { 
+                        Image(bitmap = it.asImageBitmap(), contentDescription = "Captured Image Preview", modifier = Modifier.fillMaxSize()) 
+                    }
+                    imageUri?.let { 
+                        AsyncImage(model = it, contentDescription = "Selected Image Preview", modifier = Modifier.fillMaxSize()) 
+                    }
                 }
-            } else {
-                Text(text = resultText, fontSize = 18.sp, modifier = Modifier.padding(16.dp))
+            }
+            
+            Button(onClick = { 
+                scope.launch {
+                    try {
+                        val file = File(context.cacheDir, "temp_verify.jpg")
+                        val outputStream = FileOutputStream(file)
+                        if (bitmap != null) {
+                            bitmap?.compress(Bitmap.CompressFormat.JPEG, 80, outputStream)
+                        } else {
+                            context.contentResolver.openInputStream(imageUri!!)?.use { it.copyTo(outputStream) }
+                        }
+                        outputStream.close()
+                        verifyImage(file)
+                    } catch (e: Exception) {
+                        resultText = "Error preparing image: ${e.message}"
+                    }
+                }
+            }, modifier = Modifier.fillMaxWidth(), enabled = !isLoading) {
+                Text("Verify This Image")
+            }
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
+        Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                if (isLoading) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                Text(resultText, fontWeight = FontWeight.Medium)
             }
         }
     }
